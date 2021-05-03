@@ -26,6 +26,7 @@ import glob
 import argparse
 import itertools
 import shutil
+import pydrive_utils
 from collections import OrderedDict, defaultdict
 
 PIL.ImageFile.LOAD_TRUNCATED_IMAGES = True # avoid "Decompressed Data Too Large" error
@@ -152,8 +153,7 @@ def format_time(seconds):
 
 #----------------------------------------------------------------------------
 
-def download_files(file_specs, num_threads=32, status_delay=0.2, timing_window=50, **download_kwargs):
-
+def download_files(file_specs, num_threads=32, status_delay=0.2, timing_window=50, drive=None, **download_kwargs):
     # Determine which files to download.
     done_specs = {spec['file_path']: spec for spec in file_specs if os.path.isfile(spec['file_path'])}
     missing_specs = [spec for spec in file_specs if spec['file_path'] not in done_specs]
@@ -169,7 +169,7 @@ def download_files(file_specs, num_threads=32, status_delay=0.2, timing_window=5
     exception_queue = queue.Queue()
     for spec in missing_specs:
         spec_queue.put(spec)
-    thread_kwargs = dict(spec_queue=spec_queue, exception_queue=exception_queue, stats=stats, download_kwargs=download_kwargs)
+    thread_kwargs = dict(spec_queue=spec_queue, exception_queue=exception_queue, stats=stats, drive=drive, download_kwargs=download_kwargs)
     for _thread_idx in range(min(num_threads, len(missing_specs))):
         threading.Thread(target=_download_thread, kwargs=thread_kwargs, daemon=True).start()
 
@@ -206,12 +206,17 @@ def download_files(file_specs, num_threads=32, status_delay=0.2, timing_window=5
         except queue.Empty:
             pass
 
-def _download_thread(spec_queue, exception_queue, stats, download_kwargs):
+def _download_thread(spec_queue, exception_queue, stats, drive, download_kwargs):
     with requests.Session() as session:
         while not spec_queue.empty():
             spec = spec_queue.get()
             try:
-                download_file(session, spec, stats, **download_kwargs)
+                if drive != None:
+                    pydrive_utils.pydrive_download(drive, spec['file_url'], spec['file_path'])
+                    with stats['lock']:
+                        stats['files_done'] += 1
+                else:
+                    download_file(session, spec, stats, **download_kwargs)
             except:
                 exception_queue.put(sys.exc_info())
 
@@ -351,9 +356,10 @@ def recreate_aligned_images(json_data, dst_dir='realign1024x1024', output_size=1
 #----------------------------------------------------------------------------
 
 def run(tasks, **download_kwargs):
+    drive = pydrive_utils.create_drive_manager(True)
     if not os.path.isfile(json_spec['file_path']) or not os.path.isfile('LICENSE.txt'):
         print('Downloading JSON metadata...')
-        download_files([json_spec, license_specs['json']], **download_kwargs)
+        download_files([json_spec, license_specs['json']], drive=drive, **download_kwargs)
 
     print('Parsing JSON metadata...')
     with open(json_spec['file_path'], 'rb') as f:
@@ -375,7 +381,7 @@ def run(tasks, **download_kwargs):
     if len(specs):
         print('Downloading %d files...' % len(specs))
         np.random.shuffle(specs) # to make the workload more homogeneous
-        download_files(specs, **download_kwargs)
+        download_files(specs, drive=drive, **download_kwargs)
 
     if 'align' in tasks:
         recreate_aligned_images(json_data)
